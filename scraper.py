@@ -89,21 +89,51 @@ def search_in_html(html_content):
     return detected
 
 
+def dismiss_cookie_banner(page):
+    """
+    Cierra el banner de selección de cookies de Prime Video si está presente.
+    Hace clic en 'Rechazar' para no aceptar cookies opcionales.
+    Este banner bloquea la interacción con el resto de la página.
+    """
+    try:
+        # El banner tiene botones con data-testid="critical-notification-v2-button-N"
+        # button-0 = Aceptar, button-1 = Rechazar, button-2 = Personalizar
+        reject_btn = page.locator('[data-testid="critical-notification-v2-button-1"]')
+        if reject_btn.is_visible(timeout=3000):
+            reject_btn.click(timeout=5000)
+            # Esperar a que el banner desaparezca
+            page.wait_for_selector(
+                '[data-testid="critical-notification"]',
+                state='hidden',
+                timeout=5000
+            )
+            print("  [info] Banner de cookies cerrado.")
+    except Exception:
+        # Si no hay banner o ya está cerrado, no hacemos nada
+        pass
+
+
 def process_url(page, url):
     """
     Carga la URL y detecta accesibilidad española.
 
     Estrategia robusta:
     1. Carga la página completa (networkidle)
-    2. Hace clic en la pestaña "Detalles" para forzar el renderizado de la sección
+    2. Cierra el banner de cookies si aparece (bloquea clics en la página)
+    3. Hace clic en la pestaña "Detalles" para forzar el renderizado de la sección
        que contiene los idiomas de audio y subtítulos
-    3. Espera a que aparezca el contenedor de detalles
-    4. Obtiene el HTML completo y busca los patrones
-    5. Si no encuentra nada en el DOM, busca en el JSON de hidratación embebido (SSR)
+    4. Espera a que aparezca el contenedor de detalles
+    5. Obtiene el HTML completo y busca los patrones
+    6. Si no encuentra nada en el DOM, busca en el JSON de hidratación embebido (SSR)
 
     Retorna una lista con los tipos detectados (puede ser vacía).
     """
     page.goto(url, wait_until="networkidle", timeout=120000)
+
+    # PASO CRÍTICO: Cerrar el banner de cookies si aparece.
+    # Prime Video muestra este banner de forma intermitente (especialmente en IPs nuevas
+    # o después de limpiar cookies). Si no se cierra, bloquea todos los clics posteriores.
+    dismiss_cookie_banner(page)
 
     # Intentar hacer clic en la pestaña "Detalles" para asegurar que
     # el contenido de idiomas y subtítulos está visible en el DOM
