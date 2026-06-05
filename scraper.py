@@ -88,11 +88,8 @@ def audio_description_found(page):
     text = page.locator("body").inner_text().lower()
 
     patterns = [
-        "español (españa) [descripción de audio]",
-        "español (españa)[descripción de audio]",
-        "spanish (spain) [audio description]",
-        "audio description",
-        "descripción de audio"
+        "Español (España) [descripción de audio]",
+        "Español (España) [CC]"
     ]
 
     return any(pattern in text for pattern in patterns)
