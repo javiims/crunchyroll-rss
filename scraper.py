@@ -6,8 +6,8 @@ from email.utils import formatdate
 import os
 import time
 
-# Solo usamos la URL oficial del canal para evitar series externas
-CHANNEL_URL = "https://www.primevideo.com/channel/bf569eea-cd6f-bcee-4f52-d9c08d36e02b/"
+# Volvemos a usar la URL de búsqueda porque Amazon no la bloquea en servidores
+SEARCH_URL = "https://www.primevideo.com/search/ref=atv_sr_sug_1?phrase=crunchyroll"
 BASE_URL = "https://www.primevideo.com"
 RSS_FILE = "feed.xml"
 
@@ -19,12 +19,11 @@ def load_or_create_rss():
         rss = ET.Element("rss", version="2.0")
         channel = ET.SubElement(rss, "channel")
         ET.SubElement(channel, "title").text = "Novedades Castellano - Crunchyroll Prime Video"
-        ET.SubElement(channel, "link").text = CHANNEL_URL
+        ET.SubElement(channel, "link").text = "https://www.primevideo.com/channel/bf569eea-cd6f-bcee-4f52-d9c08d36e02b/"
         ET.SubElement(channel, "description").text = "Avisos de nuevas series con subtítulos [CC] o descripción de audio en Español (España)"
         return ET.ElementTree(rss), rss
 
 def get_known_urls(channel):
-    # Extraemos todas las URLs que ya están en el RSS para no volver a visitarlas jamás
     urls = set()
     for item in channel.findall('item'):
         link = item.find('link')
@@ -42,8 +41,6 @@ def add_rss_item(channel, title, url, description):
 def main():
     tree, rss = load_or_create_rss()
     channel = rss.find("channel")
-    
-    # Obtenemos la lista de lo que ya hemos procesado
     known_urls = get_known_urls(channel)
 
     with Stealth().use_sync(sync_playwright()) as p:
@@ -64,50 +61,57 @@ def main():
         page = context.new_page()
         page.set_default_timeout(60000)
 
-        print("Accediendo en exclusiva al canal de Crunchyroll...", flush=True)
-        unique_links = set()
+        print("Buscando catálogo a través del buscador general para evitar el bloqueo...", flush=True)
+        unique_ids = set()
 
         try:
-            page.goto(CHANNEL_URL)
+            page.goto(SEARCH_URL)
             page.wait_for_load_state("domcontentloaded")
             time.sleep(8) 
 
             try:
-                page.click("input[name='accept']", timeout=5000)
+                page.locator("input[name='accept'], button:has-text('Aceptar')").first.click(timeout=5000)
                 time.sleep(2)
             except:
                 pass
 
-            for _ in range(12):
-                page.evaluate("window.scrollBy(0, 1500)")
-                time.sleep(2)
-
-            dom_links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
-            for link in dom_links:
-                if link and "/detail/" in link and "primevideo.com" in link:
-                    part = link.split('/detail/')[1].split('/')[0]
-                    unique_links.add(f"{BASE_URL}/detail/{part}/")
+            for _ in range(15):
+                page.mouse.wheel(0, 1500)
+                time.sleep(1.5)
 
             html_content = page.content()
-            regex_links = re.findall(r'/detail/[A-Z0-9]{10,30}/', html_content)
-            for path in regex_links:
-                unique_links.add(f"{BASE_URL}{path}")
+
+            dom_links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href || '')")
+            for link in dom_links:
+                match = re.search(r'/(?:detail|dp)/([A-Z0-9]{10,30})', link)
+                if match: unique_ids.add(match.group(1))
+
+            regex_paths = re.findall(r'/(?:detail|dp)/([A-Z0-9]{10,30})', html_content)
+            for id_ in regex_paths: unique_ids.add(id_)
+
+            json_ids = re.findall(r'"titleId":"([A-Z0-9]{10,30})"', html_content)
+            for id_ in json_ids: unique_ids.add(id_)
 
         except Exception as e:
-            print(f"Aviso en carga del canal: {e}", flush=True)
+            print(f"Aviso en carga: {e}", flush=True)
 
-        print(f"Se han encontrado {len(unique_links)} enlaces en el canal. Descartando los ya conocidos...", flush=True)
+        print(f"Se han encontrado {len(unique_ids)} resultados. Filtrando externos y conocidos...", flush=True)
 
-        for url in unique_links:
-            # OPTIMIZACIÓN: Si la URL ya está en el XML, pasamos a la siguiente sin abrir el navegador
+        for video_id in unique_ids:
+            url = f"{BASE_URL}/detail/{video_id}/"
+            
             if url in known_urls:
                 continue
 
             try:
                 page.goto(url)
-                time.sleep(4)
+                time.sleep(3)
                 
                 content = page.content()
+                
+                # FILTRO ESTRICTO: Si la página de la serie no dice "Crunchyroll", la saltamos.
+                if "crunchyroll" not in content.lower():
+                    continue
                 
                 has_cc = "Español (España) [CC]" in content
                 has_audio = "Español (España) [descripción de audio]" in content
