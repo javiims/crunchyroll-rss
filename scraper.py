@@ -1,10 +1,13 @@
+import re
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 import xml.etree.ElementTree as ET
 from email.utils import formatdate
 import os
 import time
 
 CHANNEL_URL = "https://www.primevideo.com/channel/bf569eea-cd6f-bcee-4f52-d9c08d36e02b/"
+SEARCH_URL = "https://www.primevideo.com/search/ref=atv_sr_sug_1?phrase=crunchyroll"
 BASE_URL = "https://www.primevideo.com"
 RSS_FILE = "feed.xml"
 
@@ -39,58 +42,78 @@ def main():
     channel = rss.find("channel")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        # Camuflar la automatización simulando ser Google Chrome en un Windows 10 con monitor 1080p
+        # Modo camuflaje y anti-detección de bots
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--no-sandbox",
+                "--disable-setuid-sandbox"
+            ]
+        )
         context = browser.new_context(
             locale="es-ES",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
+        stealth_sync(page) # Aplicamos el parche de invisibilidad
 
-        # Usar flush=True en los print asegura que el log de GitHub se actualice en tiempo real
-        print("Accediendo al canal de Crunchyroll en Prime Video...", flush=True)
-        page.goto(CHANNEL_URL, timeout=60000)
-        
-        # Esperar a que la página termine de descargar los scripts iniciales y dar 5 segundos de margen extra
-        page.wait_for_load_state("networkidle")
-        time.sleep(5)
-
-        print("Haciendo scroll para cargar el catálogo completo...", flush=True)
-        for _ in range(15):
-            page.evaluate("window.scrollBy(0, 1500)")
-            time.sleep(2)
-
-        print("Extrayendo enlaces de la página...", flush=True)
-        # Extraer absolutamente todos los enlaces renderizados
-        links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
-
+        print("Accediendo a Prime Video...", flush=True)
         unique_links = set()
-        for link in links:
-            # Filtrar solo aquellos que lleven a los detalles de una serie/temporada
-            if link and ("/detail/" in link or "/dp/" in link) and "primevideo.com" in link:
-                clean_url = link.split('?')[0].split('ref=')[0]
-                unique_links.add(clean_url)
 
-        print(f"Se han encontrado {len(unique_links)} temporadas/series únicas. Comenzando revisión...", flush=True)
+        # Usamos dos rutas distintas de entrada para asegurar que capturamos todo
+        for target_url in [CHANNEL_URL, SEARCH_URL]:
+            try:
+                page.goto(target_url, timeout=60000)
+                page.wait_for_load_state("networkidle")
+                time.sleep(5)
+
+                try:
+                    # Cerrar panel de cookies si bloquea la pantalla
+                    page.click("input[name='accept']", timeout=3000)
+                    time.sleep(2)
+                except:
+                    pass
+
+                for _ in range(12):
+                    page.evaluate("window.scrollBy(0, 1500)")
+                    time.sleep(2)
+
+                # Método 1: Búsqueda clásica en el DOM (enlaces renderizados)
+                dom_links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
+                for link in dom_links:
+                    if link and "/detail/" in link and "primevideo.com" in link:
+                        part = link.split('/detail/')[1].split('/')[0]
+                        unique_links.add(f"{BASE_URL}/detail/{part}/")
+
+                # Método 2: Extracción en crudo mediante Regex (captura series ocultas en el código interno)
+                html_content = page.content()
+                regex_links = re.findall(r'/detail/[A-Z0-9]{10,30}/', html_content)
+                for path in regex_links:
+                    unique_links.add(f"{BASE_URL}{path}")
+
+            except Exception as e:
+                print(f"Aviso en URL base: {e}", flush=True)
+
+        print(f"Se han encontrado {len(unique_links)} temporadas/series únicas. Comenzando escaneo de idiomas...", flush=True)
 
         for url in unique_links:
             try:
-                page.goto(url, timeout=45000)
+                page.goto(url, timeout=40000)
                 page.wait_for_selector("body", timeout=15000)
-                time.sleep(1) # Pausa para asegurar que los elementos del DOM están listos
+                time.sleep(1)
                 
                 content = page.content()
                 
-                # Buscar cualquiera de las dos variaciones que indicaste
                 has_cc = "Español (España) [CC]" in content
                 has_audio = "Español (España) [descripción de audio]" in content
                 
                 if (has_cc or has_audio) and not item_exists(channel, url):
-                    title_str = page.title().replace("Prime Video: ", "").strip()
-                    if not title_str:
-                        title_str = "Serie/Temporada de Crunchyroll"
-                        
+                    title_str = page.title().replace("Prime Video:", "").strip()
+                    if not title_str: title_str = "Serie/Temporada de Crunchyroll"
+                    
                     desc = f"¡Novedad! Detectado idioma en {title_str}. "
                     if has_cc: desc += "Incluye Subtítulos [CC]. "
                     if has_audio: desc += "Incluye Audio descriptivo."
