@@ -57,7 +57,7 @@ def load_or_create_rss():
         ET.SubElement(channel, "title").text = "Crunchyroll Prime Video - Novedades Accesibilidad"
         ET.SubElement(channel, "link").text = "https://www.primevideo.com"
         ET.SubElement(channel, "description").text = (
-            "Detección automática de audiodescripción y subtítulos CC en Español (España)"
+            "Detección automática de audiodescripción, audio estándar y subtítulos CC en Español (España)"
         )
         tree = ET.ElementTree(rss)
     return tree, rss
@@ -66,8 +66,6 @@ def load_or_create_rss():
 def normalize_url(url):
     """
     Normaliza la URL para forzar el idioma español en Prime Video.
-    Las URLs del usuario suelen ser primevideo.com/detail/...
-    pero el idioma español requiere primevideo.com/-/es/detail/...
     """
     if "/-/es/" not in url:
         url = url.replace("primevideo.com/", "primevideo.com/-/es/", 1)
@@ -76,11 +74,9 @@ def normalize_url(url):
 
 def extract_title(html):
     """Extrae el título de la serie desde el HTML."""
-    # Primero intentar desde el JSON de hidratación (más fiable)
     m = re.search(r'"parentTitle":"([^"]+)"', html)
     if m:
         return m.group(1)
-    # Fallback: etiqueta <title>
     m = re.search(r"<title>Prime Video:\s*(.+?)</title>", html)
     if m:
         return m.group(1).strip()
@@ -89,36 +85,33 @@ def extract_title(html):
 
 def search_in_html(html):
     """
-    Busca los patrones de accesibilidad española en el HTML.
-    Retorna lista con los tipos detectados.
+    Busca los patrones de accesibilidad y doblaje en el HTML.
     """
     detected = []
-    # Normalizar espacios para no tener problemas con saltos de línea
     clean = re.sub(r"\s+", " ", html)
 
     # 1. Audiodescripción en Español (España)
-    if re.search(
-        r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]',
-        clean, re.IGNORECASE
-    ):
-        detected.append("Audiodescripción en Español (España)")
+    if re.search(r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]', clean, re.IGNORECASE):
+        detected.append("Audiodescripción")
 
     # 2. Subtítulos CC en Español (España)
-    if re.search(
-        r'Español\s*\(España\)\s*\[CC\]',
-        clean, re.IGNORECASE
-    ):
-        detected.append("Subtítulos CC en Español (España)")
+    if re.search(r'Español\s*\(España\)\s*\[CC\]', clean, re.IGNORECASE):
+        detected.append("Subtítulos CC")
+        
+    # 3. Audio Estándar en Español (España)
+    # Buscamos en el array interno de Prime Video para asegurar que es un audio y no un subtítulo
+    audio_match = re.search(r'"audioTracks"\s*:\s*\[(.*?)\]', clean, re.IGNORECASE)
+    if audio_match:
+        audio_data = audio_match.group(1).lower()
+        # Buscamos la cadena exacta con comillas para no atrapar el de descripción de audio
+        if re.search(r'"español\s*\(españa\)"', audio_data):
+            detected.append("Audio Estándar")
 
     return detected
 
 
 def fetch_url(url, session, retries=3, delay=5):
-    """
-    Descarga el HTML de una URL con reintentos.
-    Usa requests en lugar de Playwright: el servidor ya devuelve el HTML
-    completo con todos los datos de accesibilidad sin necesitar JavaScript.
-    """
+    """Descarga el HTML de una URL con reintentos."""
     for attempt in range(1, retries + 1):
         try:
             r = session.get(url, headers=HEADERS, timeout=30)
@@ -136,7 +129,7 @@ def add_rss_item(channel, title, url, detected_types):
     item = ET.SubElement(channel, "item")
     ET.SubElement(item, "title").text = title
     ET.SubElement(item, "link").text = url
-    description = "Detectado: " + " | ".join(detected_types)
+    description = "Detectado: " + " | ".join(detected_types) + " en Español (España)"
     ET.SubElement(item, "description").text = description
     pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
     ET.SubElement(item, "pubDate").text = pub_date
@@ -173,16 +166,14 @@ def main():
                 print(f"  ✅ Encontrado en '{title}': {', '.join(detected_types)}")
                 add_rss_item(channel, title, url, detected_types)
                 found_any = True
-                # NO añadir a pending: se elimina permanentemente
             else:
-                print(f"  ❌ Sin accesibilidad española: '{title}'")
+                print(f"  ❌ Sin accesibilidad en Castellano: '{title}'")
                 pending_urls.append(url)
 
         except Exception as e:
             print(f"  ⚠️ Error inesperado: {e}")
             pending_urls.append(url)
 
-        # Pausa breve entre peticiones para no estresar el servidor
         time.sleep(2)
 
     save_links(pending_urls)
