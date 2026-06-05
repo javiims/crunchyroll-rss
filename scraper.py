@@ -1,16 +1,11 @@
-import requests
-import re
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import xml.etree.ElementTree as ET
 from email.utils import formatdate
 import os
+import time
 
+CHANNEL_URL = "https://www.primevideo.com/channel/bf569eea-cd6f-bcee-4f52-d9c08d36e02b/"
 BASE_URL = "https://www.primevideo.com"
-# Páginas base para extraer el catálogo de Crunchyroll
-SEARCH_URLS = [
-    "https://www.primevideo.com/storefront/channels?jic=20%7CEgxzdWJzY3JpcHRpb24%3D&benefitId=crunchyrolles",
-    "https://www.primevideo.com/search/ref=atv_sr_sug_1?phrase=crunchyroll"
-]
 RSS_FILE = "feed.xml"
 
 def load_or_create_rss():
@@ -20,9 +15,9 @@ def load_or_create_rss():
     else:
         rss = ET.Element("rss", version="2.0")
         channel = ET.SubElement(rss, "channel")
-        ET.SubElement(channel, "title").text = "Novedades Castellano - Crunchyroll en Prime Video"
-        ET.SubElement(channel, "link").text = BASE_URL
-        ET.SubElement(channel, "description").text = "Avisos de nuevos subtítulos [CC] y descripciones de audio en Español (España)"
+        ET.SubElement(channel, "title").text = "Novedades Castellano [CC] - Crunchyroll"
+        ET.SubElement(channel, "link").text = CHANNEL_URL
+        ET.SubElement(channel, "description").text = "Avisos de nuevas temporadas con subtítulos Español (España) [CC]"
         return ET.ElementTree(rss), rss
 
 def item_exists(channel, url):
@@ -39,56 +34,63 @@ def add_rss_item(channel, title, url, description):
     ET.SubElement(item, "description").text = description
     ET.SubElement(item, "pubDate").text = formatdate(timeval=None, localtime=False, usegmt=True)
 
-def get_catalog_links(headers):
-    links = set()
-    for search_url in SEARCH_URLS:
-        try:
-            res = requests.get(search_url, headers=headers, timeout=10)
-            soup = BeautifulSoup(res.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a['href']
-                if "/detail/" in href:
-                    # Limpiar la URL para evitar duplicados
-                    clean_url = BASE_URL + href.split('?')[0].split('ref=')[0]
-                    links.add(clean_url)
-        except Exception:
-            pass
-    return list(links)
-
 def main():
     tree, rss = load_or_create_rss()
     channel = rss.find("channel")
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Accept-Language": "es-ES,es;q=0.9"
-    }
-    
-    # 1. Rastrear y obtener todas las URLs del catálogo disponibles
-    series_urls = get_catalog_links(headers)
-    
-    # 2. Visitar cada serie y buscar los textos objetivo
-    for url in series_urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                html = res.text
-                has_cc = "Español (España) [CC]" in html
-                has_audio = "Español (España) [descripción de audio]" in html
+
+    with sync_playwright() as p:
+        # Iniciamos un navegador Chromium (Chrome) invisible
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(locale="es-ES")
+        page = context.new_page()
+
+        print("Accediendo al canal de Crunchyroll en Prime Video...")
+        page.goto(CHANNEL_URL, timeout=60000)
+        page.wait_for_load_state("networkidle")
+
+        # Hacer scroll múltiple para forzar la carga de todas las filas y series
+        print("Haciendo scroll para cargar el catálogo completo...")
+        for _ in range(15):
+            page.evaluate("window.scrollBy(0, 1500)")
+            time.sleep(2) # Esperar a que carguen las carátulas
+
+        # Extraer todos los enlaces de detalles de series/temporadas
+        links = page.locator("a[href*='/detail/']").evaluate_all(
+            "elements => elements.map(e => e.getAttribute('href'))"
+        )
+
+        unique_links = set()
+        for link in links:
+            if link:
+                # Limpiamos la URL para quedarnos con el identificador único
+                clean_url = BASE_URL + link.split('?')[0].split('ref=')[0]
+                unique_links.add(clean_url)
+
+        print(f"Se han encontrado {len(unique_links)} temporadas/series únicas. Comenzando revisión...")
+
+        # Visitar cada serie y buscar el texto exacto
+        for url in unique_links:
+            try:
+                page.goto(url, timeout=45000)
+                # Esperamos a que cargue el cuerpo de la página
+                page.wait_for_selector("body", timeout=15000)
                 
-                if (has_cc or has_audio) and not item_exists(channel, url):
-                    soup = BeautifulSoup(html, "html.parser")
-                    title_tag = soup.find("title")
-                    title = title_tag.text.replace("Prime Video: ", "") if title_tag else "Nueva Serie"
-                    
-                    desc = f"Detectado idioma castellano en {title}: "
-                    if has_cc: desc += "Incluye Subtítulos [CC]. "
-                    if has_audio: desc += "Incluye Audio descriptivo. "
+                # Leemos todo el contenido de la web cargada
+                content = page.content()
+                
+                if "Español (España) [CC]" in content and not item_exists(channel, url):
+                    title = page.title().replace("Prime Video: ", "")
+                    desc = f"¡Novedad! Detectados subtítulos Español (España) [CC] en: {title}"
                     
                     add_rss_item(channel, title, url, desc)
-        except Exception:
-            continue
+                    print(f"NUEVO AÑADIDO AL RSS: {title} - {url}")
+            except Exception as e:
+                print(f"Omitiendo {url} debido a un error de carga.")
+                continue
+
+        browser.close()
             
+    # Guardamos el archivo RSS modificado
     tree.write(RSS_FILE, encoding='utf-8', xml_declaration=True)
 
 if __name__ == "__main__":
