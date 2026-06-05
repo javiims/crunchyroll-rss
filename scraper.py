@@ -46,7 +46,6 @@ def extract_title(page):
     """Extrae el título de la página."""
     try:
         title = page.title()
-        # Eliminar prefijo "Prime Video: "
         if title.startswith("Prime Video: "):
             title = title[len("Prime Video: "):]
         return title.strip()
@@ -65,44 +64,81 @@ def add_rss_item(channel, title, url, detected_types):
     ET.SubElement(item, "pubDate").text = pub_date
 
 
+def search_in_html(html_content):
+    """
+    Busca los patrones de accesibilidad en el HTML crudo.
+    Busca tanto en el DOM renderizado como en el JSON de hidratación embebido.
+    Retorna lista de tipos detectados.
+    """
+    detected = []
+
+    # Patrón 1: Audiodescripción en español de España
+    # Busca la cadena exacta con variantes de codificación
+    pattern_ad = r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]'
+
+    # Patrón 2: Subtítulos CC en español de España
+    pattern_cc = r'Español\s*\(España\)\s*\[CC\]'
+
+    # Búsqueda en todo el HTML (incluye DOM + JSON embebido)
+    if re.search(pattern_ad, html_content, re.IGNORECASE):
+        detected.append("Audiodescripción en Español (España)")
+
+    if re.search(pattern_cc, html_content, re.IGNORECASE):
+        detected.append("Subtítulos CC en Español (España)")
+
+    return detected
+
+
 def process_url(page, url):
     """
-    Detecta accesibilidad española escaneando el código fuente crudo de la página.
-    
-    Busca específicamente:
-    - "Español (España) [descripción de audio]" en la sección de audios
-    - "Español (España) [CC]" en la sección de subtítulos
-    
+    Carga la URL y detecta accesibilidad española.
+
+    Estrategia robusta:
+    1. Carga la página completa (networkidle)
+    2. Hace clic en la pestaña "Detalles" para forzar el renderizado de la sección
+       que contiene los idiomas de audio y subtítulos
+    3. Espera a que aparezca el contenedor de detalles
+    4. Obtiene el HTML completo y busca los patrones
+    5. Si no encuentra nada en el DOM, busca en el JSON de hidratación embebido (SSR)
+
     Retorna una lista con los tipos detectados (puede ser vacía).
     """
     page.goto(url, wait_until="networkidle", timeout=120000)
 
-    # Obtenemos el código fuente completo
+    # Intentar hacer clic en la pestaña "Detalles" para asegurar que
+    # el contenido de idiomas y subtítulos está visible en el DOM
+    try:
+        details_tab = page.locator('[data-testid="btf-details-tab"]')
+        details_tab.click(timeout=10000)
+        # Esperar a que el contenido de detalles esté visible
+        page.wait_for_selector('#tab-content-details', state='visible', timeout=10000)
+        # Pausa breve para que React termine de renderizar
+        page.wait_for_timeout(1000)
+    except Exception:
+        # Si no se puede clicar (por ejemplo, la pestaña no existe o ya está activa),
+        # continuamos igualmente
+        pass
+
+    # Obtener el HTML completo (incluye SSR JSON + DOM renderizado)
     html_content = page.content()
 
-    # Limpiamos el HTML para facilitar búsquedas (unimos líneas)
-    clean_text = re.sub(r'\s+', ' ', html_content)
+    # Buscar patrones en el HTML completo
+    detected = search_in_html(html_content)
 
-    detected = []
-
-    # 1. Detectar Audiodescripción española
-    # Busca la cadena exacta "Español (España) [descripción de audio]"
-    # También acepta variantes con entidades HTML o codificación
-    if re.search(
-        r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]',
-        clean_text,
-        re.IGNORECASE
-    ):
-        detected.append("Audiodescripción en Español (España)")
-
-    # 2. Detectar Subtítulos CC en español de España
-    # Busca la cadena exacta "Español (España) [CC]"
-    if re.search(
-        r'Español\s*\(España\)\s*\[CC\]',
-        clean_text,
-        re.IGNORECASE
-    ):
-        detected.append("Subtítulos CC en Español (España)")
+    # Si no encontró nada, intentar buscar en el JSON de hidratación directamente
+    # (el script id="dv-web-page-hydration-data" contiene los datos en SSR)
+    if not detected:
+        try:
+            json_text = page.evaluate(
+                """() => {
+                    const el = document.getElementById('dv-web-page-hydration-data');
+                    return el ? el.textContent : '';
+                }"""
+            )
+            if json_text:
+                detected = search_in_html(json_text)
+        except Exception:
+            pass
 
     return detected
 
@@ -133,12 +169,10 @@ def main():
         for url in urls:
             print(f"Comprobando: {url}")
             try:
-                title = extract_title(page)
-
-                # Procesamos y buscamos las dos pistas de accesibilidad
+                # Procesar la URL (carga + clic en detalles + búsqueda)
                 detected_types = process_url(page, url)
 
-                # Actualizar título tras cargar la página del producto
+                # Obtener título después de cargar la página
                 title = extract_title(page)
 
                 if detected_types:
