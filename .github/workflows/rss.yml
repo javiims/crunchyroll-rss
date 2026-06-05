@@ -2,12 +2,14 @@ name: Actualizar RSS Crunchyroll
 
 on:
   schedule:
-    - cron: '0 8 * * *' # Se ejecuta todos los días a las 08:00 UTC
-  workflow_dispatch: # Te permite ejecutarlo a mano si quieres probarlo
+    - cron: '0 8 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Esto asegura que no te dé el error 403 de permisos
 
     steps:
       - name: Clonar el repositorio
@@ -18,8 +20,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar dependencias
+      - name: Instalar dependencias de Python
         run: pip install -r requirements.txt
+
+      - name: Instalar navegador (Playwright)
+        run: playwright install chromium --with-deps
 
       - name: Ejecutar el rastreador
         run: python scraper.py
