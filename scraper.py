@@ -64,6 +64,24 @@ def add_rss_item(channel, title, url, detected_types):
     ET.SubElement(item, "pubDate").text = pub_date
 
 
+def normalize_url(url):
+    """
+    Normaliza una URL de Prime Video para asegurar que incluye el prefijo de idioma español /-/es/.
+
+    Las URLs guardadas en links.txt tienen el formato:
+      https://www.primevideo.com/detail/ID/ref=...
+    Pero Prime Video sirve el contenido en español sólo cuando la URL incluye:
+      https://www.primevideo.com/-/es/detail/ID/ref=...
+
+    Sin el prefijo /-/es/, la página se sirve en el idioma por defecto del servidor
+    (normalmente inglés), haciendo que los idiomas aparezcan como "Spanish (Spain) [CC]"
+    en lugar de "Español (España) [CC]", y las regex no los detectan.
+    """
+    if '/-/es/' not in url:
+        url = url.replace('primevideo.com/', 'primevideo.com/-/es/', 1)
+    return url
+
+
 def search_in_html(html_content):
     """
     Busca los patrones de accesibilidad en el HTML crudo.
@@ -128,6 +146,8 @@ def process_url(page, url):
 
     Retorna una lista con los tipos detectados (puede ser vacía).
     """
+    # Normalizar la URL para forzar el idioma español en Prime Video
+    url = normalize_url(url)
     page.goto(url, wait_until="networkidle", timeout=120000)
 
     # PASO CRÍTICO: Cerrar el banner de cookies si aparece.
