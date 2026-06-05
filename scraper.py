@@ -1,5 +1,5 @@
 import os
-import time
+import json
 import xml.etree.ElementTree as ET
 from email.utils import formatdate
 
@@ -29,6 +29,7 @@ def save_links(links):
 
 
 def load_or_create_rss():
+
     if os.path.exists(RSS_FILE):
         tree = ET.parse(RSS_FILE)
         return tree, tree.getroot()
@@ -39,7 +40,7 @@ def load_or_create_rss():
     ET.SubElement(
         channel,
         "title"
-    ).text = "Novedades Audiodescripción Crunchyroll Prime Video"
+    ).text = "Crunchyroll Prime Video - Novedades Accesibilidad"
 
     ET.SubElement(
         channel,
@@ -49,21 +50,35 @@ def load_or_create_rss():
     ET.SubElement(
         channel,
         "description"
-    ).text = "Series de Crunchyroll en Prime Video que reciben audiodescripción en castellano"
+    ).text = (
+        "Detección automática de audiodescripción "
+        "y subtítulos CC en Español (España)"
+    )
 
     return ET.ElementTree(rss), rss
 
 
-def add_rss_item(channel, title, url):
+def add_rss_item(channel, title, url, detected_type):
+
     item = ET.SubElement(channel, "item")
 
-    ET.SubElement(item, "title").text = title
-    ET.SubElement(item, "link").text = url
+    ET.SubElement(
+        item,
+        "title"
+    ).text = title
+
+    ET.SubElement(
+        item,
+        "link"
+    ).text = url
 
     ET.SubElement(
         item,
         "description"
-    ).text = "Se ha detectado audiodescripción en Español (España)"
+    ).text = (
+        f"Detectado: {detected_type} "
+        f"en Español (España)"
+    )
 
     ET.SubElement(
         item,
@@ -75,24 +90,97 @@ def add_rss_item(channel, title, url):
     )
 
 
-def audio_description_found(page):
+def extract_hydration_json(page):
 
-    # Esperar carga principal
-    page.wait_for_load_state("networkidle")
-
-    # Scroll para forzar carga de detalles
-    for _ in range(8):
-        page.mouse.wheel(0, 2000)
-        page.wait_for_timeout(1000)
-
-    text = page.locator("body").inner_text().lower()
-
-    patterns = [
-        "Español (España) [descripción de audio]",
-        "Español (España) [CC]"
+    selectors = [
+        "#dv-web-page-hydration-data",
+        "script#dv-web-page-hydration-data"
     ]
 
-    return any(pattern in text for pattern in patterns)
+    for selector in selectors:
+
+        try:
+
+            locator = page.locator(selector)
+
+            if locator.count() == 0:
+                continue
+
+            raw_json = locator.first.inner_text()
+
+            if not raw_json.strip():
+                continue
+
+            return json.loads(raw_json)
+
+        except Exception:
+            continue
+
+    return None
+
+
+def find_spanish_accessibility(data):
+
+    if not data:
+        return None
+
+    text = json.dumps(
+        data,
+        ensure_ascii=False
+    ).lower()
+
+    if "español (españa) [descripción de audio]" in text:
+        return "Audiodescripción"
+
+    if "español (españa) [cc]" in text:
+        return "Subtítulos CC"
+
+    return None
+
+
+def extract_title(page):
+
+    try:
+
+        title = page.title()
+
+        title = (
+            title
+            .replace("Prime Video:", "")
+            .strip()
+        )
+
+        if title:
+            return title
+
+    except Exception:
+        pass
+
+    return "Título desconocido"
+
+
+def process_url(page, url):
+
+    page.goto(
+        url,
+        wait_until="networkidle",
+        timeout=120000
+    )
+
+    data = extract_hydration_json(page)
+
+    if not data:
+        print("No se encontró JSON de hidratación")
+        return None, None
+
+    detected_type = find_spanish_accessibility(data)
+
+    if not detected_type:
+        return None, None
+
+    title = extract_title(page)
+
+    return title, detected_type
 
 
 def main():
@@ -100,10 +188,11 @@ def main():
     urls = load_links()
 
     if not urls:
-        print("No hay URLs pendientes")
+        print("No hay enlaces pendientes.")
         return
 
     tree, rss = load_or_create_rss()
+
     channel = rss.find("channel")
 
     pending_urls = []
@@ -120,49 +209,53 @@ def main():
             viewport={
                 "width": 1920,
                 "height": 1080
-            }
+            },
+            user_agent=(
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/136.0.0.0 "
+                "Safari/537.36"
+            )
         )
 
         page = context.new_page()
 
         for url in urls:
 
+            print(f"Comprobando: {url}")
+
             try:
 
-                print(f"Comprobando: {url}")
-
-                page.goto(
-                    url,
-                    timeout=120000,
-                    wait_until="domcontentloaded"
+                title, detected_type = process_url(
+                    page,
+                    url
                 )
 
-                if audio_description_found(page):
-
-                    title = page.title()
-
-                    title = (
-                        title
-                        .replace("Prime Video:", "")
-                        .strip()
-                    )
+                if detected_type:
 
                     print(
-                        f"Audiodescripción encontrada: {title}"
+                        f"Encontrado: {detected_type}"
                     )
 
                     add_rss_item(
                         channel,
                         title,
-                        url
+                        url,
+                        detected_type
                     )
 
                     found_any = True
 
+                    # IMPORTANTE:
+                    # NO se añade a pending_urls,
+                    # por lo que desaparece de links.txt
+
                 else:
 
                     print(
-                        "No encontrada, seguirá en seguimiento"
+                        "Sin cambios."
                     )
 
                     pending_urls.append(url)
@@ -170,7 +263,7 @@ def main():
             except Exception as e:
 
                 print(
-                    f"Error en {url}: {e}"
+                    f"Error: {e}"
                 )
 
                 pending_urls.append(url)
@@ -180,11 +273,18 @@ def main():
     save_links(pending_urls)
 
     if found_any:
+
         tree.write(
             RSS_FILE,
             encoding="utf-8",
             xml_declaration=True
         )
+
+        print("RSS actualizado.")
+
+    print(
+        f"URLs pendientes: {len(pending_urls)}"
+    )
 
 
 if __name__ == "__main__":
