@@ -28,7 +28,7 @@ def load_or_create_rss():
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = "Crunchyroll Prime Video - Novedades Accesibilidad"
     ET.SubElement(channel, "link").text = "https://www.primevideo.com"
-    ET.SubElement(channel, "description").text = "Detección automática de audiodescripción y audio en Español (España)"
+    ET.SubElement(channel, "description").text = "Detección automática de Audiodescripción y Subtítulos CC en Español (España)"
     
     return ET.ElementTree(rss), rss
 
@@ -40,35 +40,48 @@ def add_rss_item(channel, title, url, detected_type):
     ET.SubElement(item, "pubDate").text = formatdate(timeval=None, localtime=False, usegmt=True)
 
 def process_url(page, url):
-    """Detecta el audio de forma infalible escaneando la lista de pistas interna."""
+    """Detecta el audio y los subtítulos CC escaneando el código fuente y el texto de la página."""
     page.goto(url, wait_until="networkidle", timeout=120000)
-    html_content = page.content()
     
-    # 1. Búsqueda exacta en la base de datos interna (JSON incrustado de Amazon)
-    # Buscamos la lista "audioTracks":["..."] que Prime Video incluye en el código de la página.
-    audio_match = re.search(r'"audioTracks"\s*:\s*\[(.*?)\]', html_content)
-    if audio_match:
-        audio_data = audio_match.group(1).lower()
-        if "español (españa) [descripción de audio]" in audio_data:
-            return "Audiodescripción"
-        elif "español (españa)" in audio_data:
-            return "Audio Estándar"
+    # Convertimos todo a minúsculas para evitar errores por mayúsculas/minúsculas de Amazon
+    html_content = page.content().lower()
+    
+    detected = []
+    
+    # 1. Búsqueda directa en el HTML de las etiquetas específicas (Son únicas, no hay falsos positivos)
+    has_audio_desc = "español (españa) [descripción de audio]" in html_content
+    has_sub_cc = "español (españa) [cc]" in html_content
+    has_audio_norm = False
+    
+    # 2. Búsqueda segura del Audio Estándar
+    # Como "Español (España)" a secas puede confundirse con un subtítulo, lo buscamos estrictamente en el array interno de Prime Video
+    audio_match = re.search(r'"audiotracks"\s*:\s*\[(.*?)\]', html_content)
+    if audio_match and "español (españa)" in audio_match.group(1):
+        has_audio_norm = True
+    else:
+        # Respaldo de seguridad: Verificamos en el texto visual, solo dentro de la sección "Idiomas de audio"
+        try:
+            text = page.locator("body").inner_text().lower()
+            text_clean = " ".join(text.split())
+            if "idiomas de audio" in text_clean:
+                audio_section = text_clean.split("subtítulos")[0]
+                if "español (españa)" in audio_section:
+                    has_audio_norm = True
+        except Exception:
+            pass
 
-    # 2. Respaldo: Leer el texto visible de la sección de Audios
-    # Por si Amazon cambia la estructura, aislamos estrictamente la sección "Idiomas de audio"
-    try:
-        text = page.locator("body").inner_text()
-        text_clean = " ".join(text.split())
+    # 3. Formateamos el mensaje final según lo que haya detectado
+    if has_audio_desc:
+        detected.append("Audiodescripción")
+    elif has_audio_norm:
+        detected.append("Audio Estándar")
         
-        if "Idiomas de audio" in text_clean:
-            # Cortamos todo lo que haya después de "Subtítulos" para no mezclar audios con CC
-            audio_section = text_clean.split("Idiomas de audio")[1].split("Subtítulos")[0].lower()
-            if "español (españa) [descripción de audio]" in audio_section:
-                return "Audiodescripción"
-            elif "español (españa)" in audio_section:
-                return "Audio Estándar"
-    except Exception:
-        pass
+    if has_sub_cc:
+        detected.append("Subtítulos CC")
+
+    # Si detectó algo (Audio, Subtítulos, o ambos), lo devuelve unido.
+    if detected:
+        return " + ".join(detected)
         
     return None
 
