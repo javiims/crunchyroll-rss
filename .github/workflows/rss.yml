@@ -16,13 +16,6 @@ jobs:
       run: pip install -r requirements.txt
     - name: Run tracker
       run: python scraper.py
-
-    - name: Subir HTML de debug
-      uses: actions/upload-artifact@v4
-      with:
-        name: codigo-fuente-debug
-        path: debug_codigo.html
-      
     - name: Guardar RSS y actualizar lista de enlaces
       run: |
         git config --global user.name "GitHub Actions"
