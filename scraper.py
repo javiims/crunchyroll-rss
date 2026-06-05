@@ -83,39 +83,19 @@ def extract_title(html):
     return "Título desconocido"
 
 
-def search_in_html(html):
-    """
-    Busca los patrones de accesibilidad y doblaje en el HTML.
-    """
-    detected = []
-    clean = re.sub(r"\s+", " ", html)
-
-    # 1. Audiodescripción en Español (España)
-    if re.search(r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]', clean, re.IGNORECASE):
-        detected.append("Audiodescripción")
-
-    # 2. Subtítulos CC en Español (España)
-    if re.search(r'Español\s*\(España\)\s*\[CC\]', clean, re.IGNORECASE):
-        detected.append("Subtítulos CC")
-        
-    # 3. Audio Estándar en Español (España)
-    # Buscamos en el array interno de Prime Video para asegurar que es un audio y no un subtítulo
-    audio_match = re.search(r'"audioTracks"\s*:\s*\[(.*?)\]', clean, re.IGNORECASE)
-    if audio_match:
-        audio_data = audio_match.group(1).lower()
-        # Buscamos la cadena exacta con comillas para no atrapar el de descripción de audio
-        if re.search(r'"español\s*\(españa\)"', audio_data):
-            detected.append("Audio Estándar")
-
-    return detected
-
-
 def fetch_url(url, session, retries=3, delay=5):
     """Descarga el HTML de una URL con reintentos."""
     for attempt in range(1, retries + 1):
         try:
             r = session.get(url, headers=HEADERS, timeout=30)
             r.raise_for_status()
+            
+            # --- INICIO DEBUG ---
+            print(f"  [DEBUG] Guardando el HTML exacto de la petición en 'debug_codigo.html'...")
+            with open("debug_codigo.html", "w", encoding="utf-8") as f:
+                f.write(r.text)
+            # --- FIN DEBUG ---
+            
             return r.text
         except Exception as e:
             print(f"  [intento {attempt}/{retries}] Error: {e}")
@@ -123,6 +103,39 @@ def fetch_url(url, session, retries=3, delay=5):
                 time.sleep(delay)
     return None
 
+
+def search_in_html(html):
+    """Busca los patrones de accesibilidad y doblaje en el HTML."""
+    detected = []
+    clean = re.sub(r"\s+", " ", html)
+
+    print("  [DEBUG] Analizando patrones en el HTML...")
+
+    # 1. Audiodescripción en Español (España)
+    if re.search(r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]', clean, re.IGNORECASE):
+        print("  [DEBUG] -> ¡Audiodescripción encontrada!")
+        detected.append("Audiodescripción")
+
+    # 2. Subtítulos CC en Español (España)
+    if re.search(r'Español\s*\(España\)\s*\[CC\]', clean, re.IGNORECASE):
+        print("  [DEBUG] -> ¡Subtítulos CC encontrados!")
+        detected.append("Subtítulos CC")
+        
+    # 3. Audio Estándar en Español (España)
+    audio_match = re.search(r'"audioTracks"\s*:\s*\[(.*?)\]', clean, re.IGNORECASE)
+    if audio_match:
+        audio_data = audio_match.group(1).lower()
+        print(f"  [DEBUG] -> Lista 'audioTracks' de Amazon detectada: [{audio_data}]")
+        
+        if re.search(r'"español\s*\(españa\)"', audio_data):
+            print("  [DEBUG] -> ¡Audio Estándar encontrado en la lista!")
+            detected.append("Audio Estándar")
+        else:
+            print("  [DEBUG] -> El idioma Español NO está en la lista de 'audioTracks'.")
+    else:
+        print("  [DEBUG] -> ERROR: No se ha encontrado la variable 'audioTracks' en el HTML. Amazon ha cambiado la estructura.")
+
+    return detected
 
 def add_rss_item(channel, title, url, detected_types):
     """Añade un nuevo item al canal RSS."""
