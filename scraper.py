@@ -1,6 +1,6 @@
 import re
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+from playwright_stealth import Stealth
 import xml.etree.ElementTree as ET
 from email.utils import formatdate
 import os
@@ -41,8 +41,8 @@ def main():
     tree, rss = load_or_create_rss()
     channel = rss.find("channel")
 
-    with sync_playwright() as p:
-        # Modo camuflaje y anti-detección de bots
+    # Inyección de la nueva versión de Stealth 
+    with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -58,12 +58,12 @@ def main():
             viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
-        stealth_sync(page) # Aplicamos el parche de invisibilidad
+        # En la versión 2.0 de Stealth ya no hace falta aplicarlo manualmente a cada página, 
+        # el contexto ya lo lleva incluido.
 
         print("Accediendo a Prime Video...", flush=True)
         unique_links = set()
 
-        # Usamos dos rutas distintas de entrada para asegurar que capturamos todo
         for target_url in [CHANNEL_URL, SEARCH_URL]:
             try:
                 page.goto(target_url, timeout=60000)
@@ -71,7 +71,6 @@ def main():
                 time.sleep(5)
 
                 try:
-                    # Cerrar panel de cookies si bloquea la pantalla
                     page.click("input[name='accept']", timeout=3000)
                     time.sleep(2)
                 except:
@@ -81,14 +80,14 @@ def main():
                     page.evaluate("window.scrollBy(0, 1500)")
                     time.sleep(2)
 
-                # Método 1: Búsqueda clásica en el DOM (enlaces renderizados)
+                # Método 1
                 dom_links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
                 for link in dom_links:
                     if link and "/detail/" in link and "primevideo.com" in link:
                         part = link.split('/detail/')[1].split('/')[0]
                         unique_links.add(f"{BASE_URL}/detail/{part}/")
 
-                # Método 2: Extracción en crudo mediante Regex (captura series ocultas en el código interno)
+                # Método 2
                 html_content = page.content()
                 regex_links = re.findall(r'/detail/[A-Z0-9]{10,30}/', html_content)
                 for path in regex_links:
