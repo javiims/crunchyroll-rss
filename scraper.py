@@ -15,9 +15,9 @@ def load_or_create_rss():
     else:
         rss = ET.Element("rss", version="2.0")
         channel = ET.SubElement(rss, "channel")
-        ET.SubElement(channel, "title").text = "Novedades Castellano [CC] - Crunchyroll"
+        ET.SubElement(channel, "title").text = "Novedades Castellano - Crunchyroll Prime Video"
         ET.SubElement(channel, "link").text = CHANNEL_URL
-        ET.SubElement(channel, "description").text = "Avisos de nuevas temporadas con subtítulos Español (España) [CC]"
+        ET.SubElement(channel, "description").text = "Avisos de nuevas series con subtítulos [CC] o descripción de audio en Español (España)"
         return ET.ElementTree(rss), rss
 
 def item_exists(channel, url):
@@ -39,58 +39,69 @@ def main():
     channel = rss.find("channel")
 
     with sync_playwright() as p:
-        # Iniciamos un navegador Chromium (Chrome) invisible
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(locale="es-ES")
+        # Camuflar la automatización simulando ser Google Chrome en un Windows 10 con monitor 1080p
+        context = browser.new_context(
+            locale="es-ES",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
         page = context.new_page()
 
-        print("Accediendo al canal de Crunchyroll en Prime Video...")
+        # Usar flush=True en los print asegura que el log de GitHub se actualice en tiempo real
+        print("Accediendo al canal de Crunchyroll en Prime Video...", flush=True)
         page.goto(CHANNEL_URL, timeout=60000)
+        
+        # Esperar a que la página termine de descargar los scripts iniciales y dar 5 segundos de margen extra
         page.wait_for_load_state("networkidle")
+        time.sleep(5)
 
-        # Hacer scroll múltiple para forzar la carga de todas las filas y series
-        print("Haciendo scroll para cargar el catálogo completo...")
+        print("Haciendo scroll para cargar el catálogo completo...", flush=True)
         for _ in range(15):
             page.evaluate("window.scrollBy(0, 1500)")
-            time.sleep(2) # Esperar a que carguen las carátulas
+            time.sleep(2)
 
-        # Extraer todos los enlaces de detalles de series/temporadas
-        links = page.locator("a[href*='/detail/']").evaluate_all(
-            "elements => elements.map(e => e.getAttribute('href'))"
-        )
+        print("Extrayendo enlaces de la página...", flush=True)
+        # Extraer absolutamente todos los enlaces renderizados
+        links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
 
         unique_links = set()
         for link in links:
-            if link:
-                # Limpiamos la URL para quedarnos con el identificador único
-                clean_url = BASE_URL + link.split('?')[0].split('ref=')[0]
+            # Filtrar solo aquellos que lleven a los detalles de una serie/temporada
+            if link and ("/detail/" in link or "/dp/" in link) and "primevideo.com" in link:
+                clean_url = link.split('?')[0].split('ref=')[0]
                 unique_links.add(clean_url)
 
-        print(f"Se han encontrado {len(unique_links)} temporadas/series únicas. Comenzando revisión...")
+        print(f"Se han encontrado {len(unique_links)} temporadas/series únicas. Comenzando revisión...", flush=True)
 
-        # Visitar cada serie y buscar el texto exacto
         for url in unique_links:
             try:
                 page.goto(url, timeout=45000)
-                # Esperamos a que cargue el cuerpo de la página
                 page.wait_for_selector("body", timeout=15000)
+                time.sleep(1) # Pausa para asegurar que los elementos del DOM están listos
                 
-                # Leemos todo el contenido de la web cargada
                 content = page.content()
                 
-                if "Español (España) [CC]" in content and not item_exists(channel, url):
-                    title = page.title().replace("Prime Video: ", "")
-                    desc = f"¡Novedad! Detectados subtítulos Español (España) [CC] en: {title}"
+                # Buscar cualquiera de las dos variaciones que indicaste
+                has_cc = "Español (España) [CC]" in content
+                has_audio = "Español (España) [descripción de audio]" in content
+                
+                if (has_cc or has_audio) and not item_exists(channel, url):
+                    title_str = page.title().replace("Prime Video: ", "").strip()
+                    if not title_str:
+                        title_str = "Serie/Temporada de Crunchyroll"
+                        
+                    desc = f"¡Novedad! Detectado idioma en {title_str}. "
+                    if has_cc: desc += "Incluye Subtítulos [CC]. "
+                    if has_audio: desc += "Incluye Audio descriptivo."
                     
-                    add_rss_item(channel, title, url, desc)
-                    print(f"NUEVO AÑADIDO AL RSS: {title} - {url}")
-            except Exception as e:
-                print(f"Omitiendo {url} debido a un error de carga.")
+                    add_rss_item(channel, title_str, url, desc)
+                    print(f"NUEVO AÑADIDO AL RSS: {title_str} - {url}", flush=True)
+            except Exception:
                 continue
 
         browser.close()
             
-    # Guardamos el archivo RSS modificado
     tree.write(RSS_FILE, encoding='utf-8', xml_declaration=True)
 
 if __name__ == "__main__":
