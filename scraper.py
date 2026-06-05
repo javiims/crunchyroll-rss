@@ -15,6 +15,8 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/136.0.0.0 Safari/537.36"
     ),
+    "X-Forwarded-For": "80.58.0.17",  # Una IP genérica de Telefónica España
+    "X-Real-IP": "80.58.0.17",
     "Accept-Language": "es-ES,es;q=0.9",
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;"
