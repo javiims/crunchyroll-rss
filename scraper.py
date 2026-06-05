@@ -41,7 +41,6 @@ def main():
     tree, rss = load_or_create_rss()
     channel = rss.find("channel")
 
-    # Inyección de la nueva versión de Stealth 
     with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(
             headless=True,
@@ -58,20 +57,22 @@ def main():
             viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
-        # En la versión 2.0 de Stealth ya no hace falta aplicarlo manualmente a cada página, 
-        # el contexto ya lo lleva incluido.
+        
+        # Ampliamos el timeout global para que no vuelva a cortarse a los 30 segundos
+        page.set_default_timeout(60000)
 
         print("Accediendo a Prime Video...", flush=True)
         unique_links = set()
 
         for target_url in [CHANNEL_URL, SEARCH_URL]:
             try:
-                page.goto(target_url, timeout=60000)
-                page.wait_for_load_state("networkidle")
-                time.sleep(5)
+                page.goto(target_url)
+                # Cambiamos "networkidle" por "domcontentloaded" para ignorar el ruido de fondo
+                page.wait_for_load_state("domcontentloaded")
+                time.sleep(8) # Pausa manual para permitir que React/JavaScript pinte las carátulas
 
                 try:
-                    page.click("input[name='accept']", timeout=3000)
+                    page.click("input[name='accept']", timeout=5000)
                     time.sleep(2)
                 except:
                     pass
@@ -80,29 +81,29 @@ def main():
                     page.evaluate("window.scrollBy(0, 1500)")
                     time.sleep(2)
 
-                # Método 1
+                # Extracción clásica
                 dom_links = page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
                 for link in dom_links:
                     if link and "/detail/" in link and "primevideo.com" in link:
                         part = link.split('/detail/')[1].split('/')[0]
                         unique_links.add(f"{BASE_URL}/detail/{part}/")
 
-                # Método 2
+                # Extracción profunda
                 html_content = page.content()
                 regex_links = re.findall(r'/detail/[A-Z0-9]{10,30}/', html_content)
                 for path in regex_links:
                     unique_links.add(f"{BASE_URL}{path}")
 
             except Exception as e:
-                print(f"Aviso en URL base: {e}", flush=True)
+                print(f"Aviso en carga inicial: {e}", flush=True)
 
         print(f"Se han encontrado {len(unique_links)} temporadas/series únicas. Comenzando escaneo de idiomas...", flush=True)
 
         for url in unique_links:
             try:
-                page.goto(url, timeout=40000)
-                page.wait_for_selector("body", timeout=15000)
-                time.sleep(1)
+                page.goto(url)
+                # Pausa estática en lugar de esperar a selectores específicos que cambian dinámicamente
+                time.sleep(4)
                 
                 content = page.content()
                 
@@ -111,7 +112,8 @@ def main():
                 
                 if (has_cc or has_audio) and not item_exists(channel, url):
                     title_str = page.title().replace("Prime Video:", "").strip()
-                    if not title_str: title_str = "Serie/Temporada de Crunchyroll"
+                    if not title_str or title_str == "Prime Video": 
+                        title_str = "Serie de Crunchyroll"
                     
                     desc = f"¡Novedad! Detectado idioma en {title_str}. "
                     if has_cc: desc += "Incluye Subtítulos [CC]. "
