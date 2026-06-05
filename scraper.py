@@ -44,7 +44,6 @@ def add_rss_item(channel, title, url, description):
 def main():
     urls_to_check = load_links()
     if not urls_to_check:
-        print("No hay enlaces pendientes en links.txt. Saliendo...", flush=True)
         return
 
     tree, rss = load_or_create_rss()
@@ -54,51 +53,41 @@ def main():
     found_new = False
 
     with Stealth().use_sync(sync_playwright()) as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-        )
-        context = browser.new_context(
-            locale="es-ES",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(locale="es-ES", user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         page = context.new_page()
-        page.set_default_timeout(45000)
 
         for url in urls_to_check:
-            print(f"\nRevisando: {url}", flush=True)
             try:
                 page.goto(url)
-                time.sleep(4) # Pausa para asegurar que la web renderiza los idiomas
+                time.sleep(5)
                 
-                content = page.content()
+                # Obtenemos el texto de toda la página, incluyendo los bloques de detalles técnicos
+                full_text = page.evaluate("document.body.innerText")
                 
-                # Buscamos exclusivamente la etiqueta de audio descriptivo
-                if "Español (España) [descripción de audio]" in content:
+                # Buscamos el patrón exacto en texto plano.
+                # Detectamos: "Español (España) [descripción de audio]" o variantes equivalentes
+                # La regex busca "Español (España)" seguido de cualquier mención a audiodescripción
+                is_audio_desc = bool(re.search(r'Español\s?\(España\).{0,50}?descrip[c|ç]i[ó|o]n de audio', full_text, re.IGNORECASE))
+                
+                # Detectamos audio normal en español que NO sea subtítulo
+                is_audio_norm = bool(re.search(r'Español\s?\(España\)(?!\s*\[CC\])', full_text))
+
+                if is_audio_desc or is_audio_norm:
                     title_str = page.title().replace("Prime Video:", "").strip()
-                    if not title_str or title_str == "Prime Video": 
-                        title_str = "Serie/Temporada en Prime Video"
                     
-                    desc = f"¡Novedad! Se ha añadido el Audio Descriptivo en Castellano para: {title_str}."
-                    add_rss_item(channel, title_str, url, desc)
-                    
-                    print(f"✅ ¡ENCONTRADO! Añadido al RSS y eliminado de la lista: {title_str}", flush=True)
+                    # Añadimos al RSS
+                    add_rss_item(channel, title_str, url, f"Doblaje detectado: {'Audio Descriptivo' if is_audio_desc else 'Audio Estándar'}")
                     found_new = True
                 else:
-                    print("❌ Aún no tiene audio descriptivo. Se mantiene en vigilancia.", flush=True)
-                    pending_urls.append(url) # Se guarda para la próxima revisión
+                    pending_urls.append(url)
                     
-            except Exception as e:
-                print(f"⚠️ Error al cargar la página (se intentará en la siguiente ronda): {e}", flush=True)
+            except Exception:
                 pending_urls.append(url)
 
         browser.close()
 
-    # Guardamos la lista de enlaces actualizada (sin los que ya hemos detectado)
     save_links(pending_urls)
-    
-    # Solo actualizamos el feed.xml si ha habido novedades
     if found_new:
         tree.write(RSS_FILE, encoding='utf-8', xml_declaration=True)
 
