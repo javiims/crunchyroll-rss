@@ -8,20 +8,15 @@ from xml.etree import ElementTree as ET
 LINKS_FILE = "links.txt"
 RSS_FILE = "feed.xml"
 
-# Headers que simulan un navegador real para evitar bloqueos anti-bot
+# Headers que simulan un navegador real
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/136.0.0.0 Safari/537.36"
     ),
-    "X-Forwarded-For": "80.58.0.17",  # Una IP genérica de Telefónica España
-    "X-Real-IP": "80.58.0.17",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,*/*;q=0.8"
-    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -33,7 +28,6 @@ HEADERS = {
 
 
 def load_links():
-    """Carga la lista de URLs a rastrear desde el archivo de texto."""
     if not os.path.exists(LINKS_FILE):
         return []
     with open(LINKS_FILE, "r", encoding="utf-8") as f:
@@ -42,14 +36,12 @@ def load_links():
 
 
 def save_links(urls):
-    """Guarda la lista actualizada de URLs pendientes."""
     with open(LINKS_FILE, "w", encoding="utf-8") as f:
         for url in urls:
             f.write(url + "\n")
 
 
 def load_or_create_rss():
-    """Carga el RSS existente o crea uno nuevo."""
     if os.path.exists(RSS_FILE):
         tree = ET.parse(RSS_FILE)
         rss = tree.getroot()
@@ -66,16 +58,13 @@ def load_or_create_rss():
 
 
 def normalize_url(url):
-    """
-    Normaliza la URL para forzar el idioma español en Prime Video.
-    """
+    """Fuerza el directorio de idioma español en la URL."""
     if "/-/es/" not in url:
         url = url.replace("primevideo.com/", "primevideo.com/-/es/", 1)
     return url
 
 
 def extract_title(html):
-    """Extrae el título de la serie desde el HTML."""
     m = re.search(r'"parentTitle":"([^"]+)"', html)
     if m:
         return m.group(1)
@@ -85,62 +74,83 @@ def extract_title(html):
     return "Título desconocido"
 
 
-def fetch_url(url, session, retries=3, delay=5):
-    """Descarga el HTML de una URL con reintentos."""
-    for attempt in range(1, retries + 1):
-        try:
-            r = session.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            
-            # --- INICIO DEBUG ---
-            print(f"  [DEBUG] Guardando el HTML exacto de la petición en 'debug_codigo.html'...")
-            with open("debug_codigo.html", "w", encoding="utf-8") as f:
-                f.write(r.text)
-            # --- FIN DEBUG ---
-            
-            return r.text
-        except Exception as e:
-            print(f"  [intento {attempt}/{retries}] Error: {e}")
-            if attempt < retries:
-                time.sleep(delay)
-    return None
-
-
 def search_in_html(html):
     """Busca los patrones de accesibilidad y doblaje en el HTML."""
     detected = []
     clean = re.sub(r"\s+", " ", html)
 
-    print("  [DEBUG] Analizando patrones en el HTML...")
-
-    # 1. Audiodescripción en Español (España)
     if re.search(r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]', clean, re.IGNORECASE):
-        print("  [DEBUG] -> ¡Audiodescripción encontrada!")
         detected.append("Audiodescripción")
 
-    # 2. Subtítulos CC en Español (España)
     if re.search(r'Español\s*\(España\)\s*\[CC\]', clean, re.IGNORECASE):
-        print("  [DEBUG] -> ¡Subtítulos CC encontrados!")
         detected.append("Subtítulos CC")
         
-    # 3. Audio Estándar en Español (España)
     audio_match = re.search(r'"audioTracks"\s*:\s*\[(.*?)\]', clean, re.IGNORECASE)
     if audio_match:
         audio_data = audio_match.group(1).lower()
-        print(f"  [DEBUG] -> Lista 'audioTracks' de Amazon detectada: [{audio_data}]")
-        
         if re.search(r'"español\s*\(españa\)"', audio_data):
-            print("  [DEBUG] -> ¡Audio Estándar encontrado en la lista!")
             detected.append("Audio Estándar")
-        else:
-            print("  [DEBUG] -> El idioma Español NO está en la lista de 'audioTracks'.")
-    else:
-        print("  [DEBUG] -> ERROR: No se ha encontrado la variable 'audioTracks' en el HTML. Amazon ha cambiado la estructura.")
 
     return detected
 
+
+def get_spanish_proxies():
+    """Descarga una lista de proxies HTTP gratuitos de España desde ProxyScrape."""
+    print("  [DEBUG] Solicitando lista de proxies gratuitos de España...")
+    try:
+        url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=ES&ssl=all&anonymity=all"
+        response = requests.get(url, timeout=10)
+        proxies = [p.strip() for p in response.text.split('\n') if p.strip()]
+        print(f"  [DEBUG] Se han encontrado {len(proxies)} proxies españoles disponibles.")
+        # Devolvemos solo los primeros 10 para no eternizar la ejecución si fallan
+        return proxies[:10]
+    except Exception as e:
+        print(f"  [DEBUG] Fallo al obtener proxies españoles: {e}")
+        return []
+
+
+def fetch_url_with_proxy(url, session, proxy_list):
+    """Intenta descargar la web pasando por la lista de proxies hasta que uno funcione."""
+    for proxy_ip in proxy_list:
+        proxies = {
+            "http": f"http://{proxy_ip}",
+            "https": f"http://{proxy_ip}"
+        }
+        print(f"  [DEBUG] Intentando conectar a través del proxy: {proxy_ip}")
+        try:
+            # Ponemos un timeout corto (15s) porque los proxies gratuitos suelen quedarse colgados
+            r = session.get(url, headers=HEADERS, proxies=proxies, timeout=15)
+            r.raise_for_status()
+            
+            # Comprobamos si Amazon nos ha tirado un CAPTCHA por usar un proxy sospechoso
+            if "api-services-support@amazon.com" in r.text or "To discuss automated access to Amazon data please contact" in r.text:
+                print("  [DEBUG] Amazon detectó el proxy y bloqueó el acceso (CAPTCHA).")
+                continue
+                
+            print(f"  [DEBUG] ¡Conexión exitosa a través del proxy {proxy_ip}!")
+            
+            # Guardamos el HTML para poder depurar
+            with open("debug_codigo.html", "w", encoding="utf-8") as f:
+                f.write(r.text)
+                
+            return r.text
+        except Exception as e:
+            print(f"  [DEBUG] Falló la conexión con el proxy {proxy_ip}: {e}")
+
+    # Si todos los proxies fallan (o no hay proxies), intentamos sin proxy como último recurso
+    print("  [DEBUG] Agotados los proxies de España. Intentando conexión directa desde GitHub...")
+    try:
+        r = session.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        with open("debug_codigo.html", "w", encoding="utf-8") as f:
+            f.write(r.text)
+        return r.text
+    except Exception as e:
+        print(f"  [DEBUG] Falló la conexión directa: {e}")
+        return None
+
+
 def add_rss_item(channel, title, url, detected_types):
-    """Añade un nuevo item al canal RSS."""
     item = ET.SubElement(channel, "item")
     ET.SubElement(item, "title").text = title
     ET.SubElement(item, "link").text = url
@@ -162,43 +172,11 @@ def main():
     found_any = False
 
     session = requests.Session()
+    
+    # Cargamos la lista de IPs españolas una sola vez al inicio
+    spanish_proxies = get_spanish_proxies()
 
     for url in urls:
-        print(f"Comprobando: {url}")
+        print(f"\nComprobando: {url}")
         try:
-            norm_url = normalize_url(url)
-            html = fetch_url(norm_url, session)
-
-            if html is None:
-                print("  ⚠️ No se pudo descargar la página.")
-                pending_urls.append(url)
-                continue
-
-            detected_types = search_in_html(html)
-            title = extract_title(html)
-
-            if detected_types:
-                print(f"  ✅ Encontrado en '{title}': {', '.join(detected_types)}")
-                add_rss_item(channel, title, url, detected_types)
-                found_any = True
-            else:
-                print(f"  ❌ Sin accesibilidad en Castellano: '{title}'")
-                pending_urls.append(url)
-
-        except Exception as e:
-            print(f"  ⚠️ Error inesperado: {e}")
-            pending_urls.append(url)
-
-        time.sleep(2)
-
-    save_links(pending_urls)
-
-    if found_any:
-        tree.write(RSS_FILE, encoding="utf-8", xml_declaration=True)
-        print("\nRSS actualizado.")
-    else:
-        print("\nSin novedades. RSS no modificado.")
-
-
-if __name__ == "__main__":
-    main()
+            norm_url = normalize_
