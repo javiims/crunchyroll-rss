@@ -1,12 +1,33 @@
 import re
 import os
+import time
+import requests
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
-from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
 
 LINKS_FILE = "links.txt"
 RSS_FILE = "feed.xml"
+
+# Headers que simulan un navegador real para evitar bloqueos anti-bot
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "es-ES,es;q=0.9",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0",
+}
 
 
 def load_links():
@@ -42,15 +63,72 @@ def load_or_create_rss():
     return tree, rss
 
 
-def extract_title(page):
-    """Extrae el título de la página."""
-    try:
-        title = page.title()
-        if title.startswith("Prime Video: "):
-            title = title[len("Prime Video: "):]
-        return title.strip()
-    except Exception:
-        return "Título desconocido"
+def normalize_url(url):
+    """
+    Normaliza la URL para forzar el idioma español en Prime Video.
+    Las URLs del usuario suelen ser primevideo.com/detail/...
+    pero el idioma español requiere primevideo.com/-/es/detail/...
+    """
+    if "/-/es/" not in url:
+        url = url.replace("primevideo.com/", "primevideo.com/-/es/", 1)
+    return url
+
+
+def extract_title(html):
+    """Extrae el título de la serie desde el HTML."""
+    # Primero intentar desde el JSON de hidratación (más fiable)
+    m = re.search(r'"parentTitle":"([^"]+)"', html)
+    if m:
+        return m.group(1)
+    # Fallback: etiqueta <title>
+    m = re.search(r"<title>Prime Video:\s*(.+?)</title>", html)
+    if m:
+        return m.group(1).strip()
+    return "Título desconocido"
+
+
+def search_in_html(html):
+    """
+    Busca los patrones de accesibilidad española en el HTML.
+    Retorna lista con los tipos detectados.
+    """
+    detected = []
+    # Normalizar espacios para no tener problemas con saltos de línea
+    clean = re.sub(r"\s+", " ", html)
+
+    # 1. Audiodescripción en Español (España)
+    if re.search(
+        r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]',
+        clean, re.IGNORECASE
+    ):
+        detected.append("Audiodescripción en Español (España)")
+
+    # 2. Subtítulos CC en Español (España)
+    if re.search(
+        r'Español\s*\(España\)\s*\[CC\]',
+        clean, re.IGNORECASE
+    ):
+        detected.append("Subtítulos CC en Español (España)")
+
+    return detected
+
+
+def fetch_url(url, session, retries=3, delay=5):
+    """
+    Descarga el HTML de una URL con reintentos.
+    Usa requests en lugar de Playwright: el servidor ya devuelve el HTML
+    completo con todos los datos de accesibilidad sin necesitar JavaScript.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            r = session.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            print(f"  [intento {attempt}/{retries}] Error: {e}")
+            if attempt < retries:
+                time.sleep(delay)
+    return None
 
 
 def add_rss_item(channel, title, url, detected_types):
@@ -64,135 +142,6 @@ def add_rss_item(channel, title, url, detected_types):
     ET.SubElement(item, "pubDate").text = pub_date
 
 
-def normalize_url(url):
-    """
-    Normaliza una URL de Prime Video para asegurar que incluye el prefijo de idioma español /-/es/.
-
-    Las URLs guardadas en links.txt tienen el formato:
-      https://www.primevideo.com/detail/ID/ref=...
-    Pero Prime Video sirve el contenido en español sólo cuando la URL incluye:
-      https://www.primevideo.com/-/es/detail/ID/ref=...
-
-    Sin el prefijo /-/es/, la página se sirve en el idioma por defecto del servidor
-    (normalmente inglés), haciendo que los idiomas aparezcan como "Spanish (Spain) [CC]"
-    en lugar de "Español (España) [CC]", y las regex no los detectan.
-    """
-    if '/-/es/' not in url:
-        url = url.replace('primevideo.com/', 'primevideo.com/-/es/', 1)
-    return url
-
-
-def search_in_html(html_content):
-    """
-    Busca los patrones de accesibilidad en el HTML crudo.
-    Busca tanto en el DOM renderizado como en el JSON de hidratación embebido.
-    Retorna lista de tipos detectados.
-    """
-    detected = []
-
-    # Patrón 1: Audiodescripción en español de España
-    # Busca la cadena exacta con variantes de codificación
-    pattern_ad = r'Español\s*\(España\)\s*\[descripci[oó]n\s+de\s+audio\]'
-
-    # Patrón 2: Subtítulos CC en español de España
-    pattern_cc = r'Español\s*\(España\)\s*\[CC\]'
-
-    # Búsqueda en todo el HTML (incluye DOM + JSON embebido)
-    if re.search(pattern_ad, html_content, re.IGNORECASE):
-        detected.append("Audiodescripción en Español (España)")
-
-    if re.search(pattern_cc, html_content, re.IGNORECASE):
-        detected.append("Subtítulos CC en Español (España)")
-
-    return detected
-
-
-def dismiss_cookie_banner(page):
-    """
-    Cierra el banner de selección de cookies de Prime Video si está presente.
-    Hace clic en 'Rechazar' para no aceptar cookies opcionales.
-    Este banner bloquea la interacción con el resto de la página.
-    """
-    try:
-        # El banner tiene botones con data-testid="critical-notification-v2-button-N"
-        # button-0 = Aceptar, button-1 = Rechazar, button-2 = Personalizar
-        reject_btn = page.locator('[data-testid="critical-notification-v2-button-1"]')
-        if reject_btn.is_visible(timeout=3000):
-            reject_btn.click(timeout=5000)
-            # Esperar a que el banner desaparezca
-            page.wait_for_selector(
-                '[data-testid="critical-notification"]',
-                state='hidden',
-                timeout=5000
-            )
-            print("  [info] Banner de cookies cerrado.")
-    except Exception:
-        # Si no hay banner o ya está cerrado, no hacemos nada
-        pass
-
-
-def process_url(page, url):
-    """
-    Carga la URL y detecta accesibilidad española.
-
-    Estrategia robusta:
-    1. Carga la página completa (networkidle)
-    2. Cierra el banner de cookies si aparece (bloquea clics en la página)
-    3. Hace clic en la pestaña "Detalles" para forzar el renderizado de la sección
-       que contiene los idiomas de audio y subtítulos
-    4. Espera a que aparezca el contenedor de detalles
-    5. Obtiene el HTML completo y busca los patrones
-    6. Si no encuentra nada en el DOM, busca en el JSON de hidratación embebido (SSR)
-
-    Retorna una lista con los tipos detectados (puede ser vacía).
-    """
-    # Normalizar la URL para forzar el idioma español en Prime Video
-    url = normalize_url(url)
-    page.goto(url, wait_until="networkidle", timeout=120000)
-
-    # PASO CRÍTICO: Cerrar el banner de cookies si aparece.
-    # Prime Video muestra este banner de forma intermitente (especialmente en IPs nuevas
-    # o después de limpiar cookies). Si no se cierra, bloquea todos los clics posteriores.
-    dismiss_cookie_banner(page)
-
-    # Intentar hacer clic en la pestaña "Detalles" para asegurar que
-    # el contenido de idiomas y subtítulos está visible en el DOM
-    try:
-        details_tab = page.locator('[data-testid="btf-details-tab"]')
-        details_tab.click(timeout=10000)
-        # Esperar a que el contenido de detalles esté visible
-        page.wait_for_selector('#tab-content-details', state='visible', timeout=10000)
-        # Pausa breve para que React termine de renderizar
-        page.wait_for_timeout(1000)
-    except Exception:
-        # Si no se puede clicar (por ejemplo, la pestaña no existe o ya está activa),
-        # continuamos igualmente
-        pass
-
-    # Obtener el HTML completo (incluye SSR JSON + DOM renderizado)
-    html_content = page.content()
-
-    # Buscar patrones en el HTML completo
-    detected = search_in_html(html_content)
-
-    # Si no encontró nada, intentar buscar en el JSON de hidratación directamente
-    # (el script id="dv-web-page-hydration-data" contiene los datos en SSR)
-    if not detected:
-        try:
-            json_text = page.evaluate(
-                """() => {
-                    const el = document.getElementById('dv-web-page-hydration-data');
-                    return el ? el.textContent : '';
-                }"""
-            )
-            if json_text:
-                detected = search_in_html(json_text)
-        except Exception:
-            pass
-
-    return detected
-
-
 def main():
     urls = load_links()
     if not urls:
@@ -204,49 +153,45 @@ def main():
     pending_urls = []
     found_any = False
 
-    with Stealth().use_sync(sync_playwright()) as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            locale="es-ES",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/136.0.0.0 Safari/537.36"
-            )
-        )
-        page = context.new_page()
+    session = requests.Session()
 
-        for url in urls:
-            print(f"Comprobando: {url}")
-            try:
-                # Procesar la URL (carga + clic en detalles + búsqueda)
-                detected_types = process_url(page, url)
+    for url in urls:
+        print(f"Comprobando: {url}")
+        try:
+            norm_url = normalize_url(url)
+            html = fetch_url(norm_url, session)
 
-                # Obtener título después de cargar la página
-                title = extract_title(page)
+            if html is None:
+                print("  ⚠️ No se pudo descargar la página.")
+                pending_urls.append(url)
+                continue
 
-                if detected_types:
-                    print(f"  ✅ Encontrado: {', '.join(detected_types)}")
-                    add_rss_item(channel, title, url, detected_types)
-                    found_any = True
-                    # NO añadir a pending: se elimina de la lista
-                else:
-                    print("  ❌ Sin cambios (accesibilidad española no detectada).")
-                    pending_urls.append(url)
+            detected_types = search_in_html(html)
+            title = extract_title(html)
 
-            except Exception as e:
-                print(f"  ⚠️ Error en {url}: {e}")
+            if detected_types:
+                print(f"  ✅ Encontrado en '{title}': {', '.join(detected_types)}")
+                add_rss_item(channel, title, url, detected_types)
+                found_any = True
+                # NO añadir a pending: se elimina permanentemente
+            else:
+                print(f"  ❌ Sin accesibilidad española: '{title}'")
                 pending_urls.append(url)
 
-        browser.close()
+        except Exception as e:
+            print(f"  ⚠️ Error inesperado: {e}")
+            pending_urls.append(url)
+
+        # Pausa breve entre peticiones para no estresar el servidor
+        time.sleep(2)
 
     save_links(pending_urls)
 
     if found_any:
         tree.write(RSS_FILE, encoding="utf-8", xml_declaration=True)
-        print("RSS actualizado.")
+        print("\nRSS actualizado.")
     else:
-        print("Sin novedades. RSS no modificado.")
+        print("\nSin novedades. RSS no modificado.")
 
 
 if __name__ == "__main__":
