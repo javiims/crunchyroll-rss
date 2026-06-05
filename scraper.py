@@ -179,4 +179,39 @@ def main():
     for url in urls:
         print(f"\nComprobando: {url}")
         try:
-            norm_url = normalize_
+            norm_url = normalize_url(url)
+            html = fetch_url_with_proxy(norm_url, session, spanish_proxies)
+
+            if html is None:
+                print("  ⚠️ No se pudo descargar la página.")
+                pending_urls.append(url)
+                continue
+
+            detected_types = search_in_html(html)
+            title = extract_title(html)
+
+            if detected_types:
+                print(f"  ✅ Encontrado en '{title}': {', '.join(detected_types)}")
+                add_rss_item(channel, title, url, detected_types)
+                found_any = True
+            else:
+                print(f"  ❌ Sin accesibilidad española detectada: '{title}'")
+                pending_urls.append(url)
+
+        except Exception as e:
+            print(f"  ⚠️ Error inesperado: {e}")
+            pending_urls.append(url)
+
+        time.sleep(3)
+
+    save_links(pending_urls)
+
+    if found_any:
+        tree.write(RSS_FILE, encoding="utf-8", xml_declaration=True)
+        print("\nRSS actualizado.")
+    else:
+        print("\nSin novedades. RSS no modificado.")
+
+
+if __name__ == "__main__":
+    main()
